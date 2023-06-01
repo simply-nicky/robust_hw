@@ -1,0 +1,12 @@
+# data files
+data
+
+# pytorch checkpoints
+*.pt
+
+# Python cache
+*.pyc
+**/__pycache__
+
+# jupyter checkpoints
+**/.ipynb_checkpoints
