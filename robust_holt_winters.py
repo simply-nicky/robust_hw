@@ -52,6 +52,14 @@ class SmoothingTransformation(NamedTuple):
     update : TransformUpdateFn
 
 class HoldWintersState(NamedTuple):
+    """The state of Hold-Winters smoothing algorithm.
+
+    Attributes:
+        count : Update count.
+        last : Last estimate of a smoothed time-series.
+        moment : Last estimate of a slope.
+        sigma : Last estimate of standard deviation.
+    """
     count : jnp.ndarray
     last : jnp.ndarray
     moment : jnp.ndarray
@@ -205,8 +213,6 @@ def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
             callable parameters are not schedules. inject_hyperparams treats all
             callables as schedules by default, so if a hyperparameter is a
             non-schedule callable, you must specify that using this argument.
-        hyperparam_dtype: Optional datatype override. If specified, all float
-            hyperparameters will be cast to this type.
 
     Returns:
         A callable that returns a ``SmoothingTransformation``. This callable

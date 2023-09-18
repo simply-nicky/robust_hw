@@ -11,6 +11,15 @@ from scipy.linalg import pinvh
 
 @dataclass
 class QCMData():
+    """QCM Data extractor and convertor. Read raw QCM sensors read-outs and
+    pre-processes the raw time-series.
+
+    Attributes:
+        theta : Platten position.
+        s1, s2 : Raw 'Sensor1' and 'Sensor2' read-outs.
+        s1_bgd, s2_bgd : Background sensor read-outs.
+        s1_sgn, s2_sgn : Signal read-outs.
+    """
     s1      : np.ndarray
     s2      : np.ndarray
     s1_sgn  : np.ndarray
@@ -45,6 +54,14 @@ class QCMData():
 
     @classmethod
     def import_csv(cls, path: str) -> QCMData:
+        """Read all the sensor read-outs from a CSV file.
+
+        Args:
+            path : Path to a file.
+
+        Returns:
+            Updated :class:`QCMData` container.
+        """
         df = pd.read_csv(path)
         data = {}
         for col, name in cls.columns.items():
@@ -55,6 +72,15 @@ class QCMData():
 
     @classmethod
     def import_hdf(cls, path: str, key: str) -> QCMData:
+        """Read all the sensor read-outs from a HDF5 file.
+
+        Args:
+            path : Path to a file.
+            key : Data key.
+
+        Returns:
+            Updated :class:`QCMData` container.
+        """
         df = pd.read_hdf(path, key)
         data = {}
         for col, name in cls.columns.items():
@@ -64,6 +90,15 @@ class QCMData():
         return cls(**data)
 
     def extract_rotations(self, attr: str, limits: Tuple[float, float]) -> np.ndarray:
+        """Integrate signal in a `limits` window for each rotation.
+
+        Args:
+            attr : Attribute's name.
+            limits : The window bounds (`min`, `max`) in radians.
+
+        Returns:
+            Integrated signal.
+        """
         qtn, rmd = np.divmod(self.theta - limits[0], 2.0 * np.pi)
         idxs = (qtn.astype(int) + 1) * np.asarray(rmd < (limits[1] - limits[0]), dtype=int)
 
