@@ -1,5 +1,7 @@
 from typing import (Callable, Dict, Iterable, List, NamedTuple, Optional, Protocol,
                     Tuple, Union)
+from optax import GradientTransformation, OptState
+from tqdm.auto import tqdm
 import inspect
 import chex
 import jax.numpy as jnp
@@ -11,6 +13,20 @@ Element = chex.Array
 Series = List[chex.Array]
 OptState = chex.ArrayTree
 
+class HoldWintersState(NamedTuple):
+    """The state of Hold-Winters smoothing algorithm.
+
+    Attributes:
+        count : Update count.
+        last : Last estimate of a smoothed time-series.
+        moment : Last estimate of a slope.
+        sigma : Last estimate of standard deviation.
+    """
+    count : jnp.ndarray
+    last : jnp.ndarray
+    moment : jnp.ndarray
+    sigma : jnp.ndarray
+
 class TransformInitFn(Protocol):
     """A callable type for the `init` step of a `SmoothingTransformation`.
 
@@ -18,7 +34,7 @@ class TransformInitFn(Protocol):
     arbitrary structured initial `state` for the smoothing model.
     """
 
-    def __call__(self, series: Series) -> OptState:
+    def __call__(self, series: Series) -> HoldWintersState:
         """The `init` function.
 
         Args:
@@ -36,7 +52,7 @@ class TransformUpdateFn(Protocol):
     smoothing model.
     """
 
-    def __call__(self, new: Element, state: OptState) -> Tuple[Element, OptState]:
+    def __call__(self, new: Element, state: HoldWintersState) -> Tuple[Element, OptState]:
         """The `update` function.
 
         Args:
@@ -50,20 +66,6 @@ class TransformUpdateFn(Protocol):
 class SmoothingTransformation(NamedTuple):
     init : TransformInitFn
     update : TransformUpdateFn
-
-class HoldWintersState(NamedTuple):
-    """The state of Hold-Winters smoothing algorithm.
-
-    Attributes:
-        count : Update count.
-        last : Last estimate of a smoothed time-series.
-        moment : Last estimate of a slope.
-        sigma : Last estimate of standard deviation.
-    """
-    count : jnp.ndarray
-    last : jnp.ndarray
-    moment : jnp.ndarray
-    sigma : jnp.ndarray
 
 def tukey_loss(predictions: chex.Array, targets: Optional[chex.Array] = None, delta: float = 4.651) -> chex.Array:
     chex.assert_type([predictions], float)
@@ -179,7 +181,7 @@ class InjectHyperparamsState(NamedTuple):
     """Maintains inner transform state, hyperparameters, and step count."""
     count: jnp.ndarray
     hyperparams: Dict[str, chex.Numeric]
-    inner_state: OptState
+    inner_state: HoldWintersState
 
 def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
                        static_args: Union[str, Iterable[str]] = ()) -> Callable[..., SmoothingTransformation]:
@@ -255,7 +257,8 @@ def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
         def update_fn(new: Element, state: InjectHyperparamsState):
             hparams = {k: jnp.asarray(v) for k, v in state.hyperparams.items()}
             hparams.update(schedule_fn(state.count))
-            elem, inner_state = inner_factory(**static_hps, **hparams).update(new, state.inner_state)
+            elem, inner_state = inner_factory(**static_hps,
+                                              **hparams).update(new, state.inner_state)
             count = ox.safe_int32_increment(state.count)
 
             return elem, InjectHyperparamsState(count, hparams, inner_state)
@@ -263,3 +266,111 @@ def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
         return SmoothingTransformation(init_fn, update_fn)
 
     return wrapped_transform
+
+StepOutput = Tuple[jnp.ndarray, jnp.ndarray, InjectHyperparamsState, OptState]
+MetaStep = Callable[[jnp.ndarray, Series, Series, InjectHyperparamsState, OptState], StepOutput]
+
+def meta_step(smoother: SmoothingTransformation, opt: GradientTransformation) -> MetaStep:
+    @jax.jit
+    def inner_step(state: InjectHyperparamsState,
+                   new: Element) -> Tuple[InjectHyperparamsState, jnp.ndarray]:
+        elem, state = smoother.update(new, state)
+        return state, jnp.array([elem, state.inner_state.sigma])
+
+    @jax.jit
+    def loss(theta: jnp.ndarray, state: InjectHyperparamsState, train: Series,
+             test: Series) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, InjectHyperparamsState]]:
+        lambda1, lambda2, lambda_sigma = jax.nn.sigmoid(theta)
+        state.hyperparams.update(lambda1=lambda1, lambda2=lambda2, lambda_sigma=lambda_sigma)
+
+        state, _ = jax.lax.scan(inner_step, state, train)
+        idxs = jnp.arange(1, len(test) + 1)
+        offsets = jax.vmap(jnp.multiply, (None, 0))(state.inner_state.moment, idxs)
+        predictions = state.inner_state.last + offsets
+        err = ox.huber_loss((test - predictions) / state.inner_state.sigma) * \
+            state.inner_state.sigma + state.inner_state.sigma
+
+        return jnp.sum(err), (theta, state)
+
+    @jax.jit
+    def step(theta: jnp.ndarray, train: Series, test: Series, state: InjectHyperparamsState,
+             opt_state: OptState) -> StepOutput:
+        (value, (theta, state)), grad = jax.value_and_grad(loss, has_aux=True)(theta, state,
+                                                                               train, test)
+
+        updates, opt_state = opt.update(grad, opt_state)
+        theta = ox.apply_updates(theta, updates)
+
+        return value, theta, state, opt_state
+
+    return step
+
+def training(series: Series, init_decay: float=0.01, ratios: Tuple[float, float, float] = (0.02, 0.03, 0.02),
+             n_iter: int=2000, learning_rate: float=3e-3, seed: int=0):
+    """Perform training of the Holt-Winters smoothing algorithm and return optimal
+    decay rates for the signal, gradient, and standard deviation.
+
+    Args:
+        series : Series of signal values used in training.
+        init_decay : Initial value of decay rates.
+        ratios : Specifies what part of the series is used for warm-up, training, and
+            testing stages in a single iteration.
+        n_iter : Number of training iterations.
+        learning_rate : Learning rate for gradient optimiser of decay rates.
+        seed : Seed used for random number generator.
+
+    Returns:
+        Optimal decay rates for signal, gradient, and standard deviation. Also,
+        it returns the history of loss values and decay rates at each iteration.
+    """
+    smoother = inject_hyperparams(robust_holt_winters)(lambda1=init_decay, lambda2=init_decay,
+                                                       lambda_sigma=init_decay)
+    schedule = ox.cosine_onecycle_schedule(n_iter, learning_rate)
+    opt = ox.inject_hyperparams(ox.adam)(learning_rate=schedule)
+
+    decay = jnp.full(3, -jnp.log(1 / init_decay - 1))
+    opt_state = opt.init(decay)
+
+    step = meta_step(smoother, opt)
+
+    n_warmup, n_train, n_test = (ratio * series.size for ratio in ratios)
+    key = jax.random.PRNGKey(seed)
+    criteria, decays = [], []
+
+    for _ in tqdm(total=range(n_iter), desc="Training"):
+        idx = jax.random.randint(key, (1,), n_warmup, series.size - n_train - n_test)[0]
+        state = smoother.init(series[idx - n_warmup:idx])
+        train, test = series[idx:idx + n_train], series[idx + n_train:idx + n_train + n_test]
+        crit, decay, state, opt_state = step(decay, train, test, state, opt_state)
+        criteria.append(crit)
+        decays.append(decay)
+
+    return jax.nn.sigmoid(decays[-1]), (criteria, decays)
+
+def initialise(smoother: SmoothingTransformation, train: Series) -> HoldWintersState:
+    """Calculate an initial smoothing state based on a preliminary series (train)
+    of signal values.
+
+    Args:
+        smoother : Hold-Winters smoothing transformation.
+        train : A series of signal values used to calculate initial smoothing
+            state.
+
+    Returns:
+        Initial smoothing state.
+    """
+    return smoother.init(train)
+
+def smoothe(smoother: SmoothingTransformation, new: Element,
+            state: HoldWintersState) -> Tuple[Element, HoldWintersState]:
+    """Smoothe a current signal value and update a current smoothing state.
+
+    Args:
+        smoother : Hold-Winters smoothing transformation.
+        new : Current signal value.
+        state : Current smoothing state.
+
+    Returns:
+        Smoothed signal value and updated smoothing state.
+    """
+    return smoother.update(new, state)
