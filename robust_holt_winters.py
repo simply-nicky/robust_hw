@@ -13,7 +13,7 @@ Element = chex.Array
 Series = List[chex.Array]
 OptState = chex.ArrayTree
 
-class HoldWintersState(NamedTuple):
+class HoltWintersState(NamedTuple):
     """The state of Hold-Winters smoothing algorithm.
 
     Attributes:
@@ -34,7 +34,7 @@ class TransformInitFn(Protocol):
     arbitrary structured initial `state` for the smoothing model.
     """
 
-    def __call__(self, series: Series) -> HoldWintersState:
+    def __call__(self, series: Series) -> HoltWintersState:
         """The `init` function.
 
         Args:
@@ -52,7 +52,7 @@ class TransformUpdateFn(Protocol):
     smoothing model.
     """
 
-    def __call__(self, new: Element, state: HoldWintersState) -> Tuple[Element, OptState]:
+    def __call__(self, new: Element, state: HoltWintersState) -> Tuple[Element, OptState]:
         """The `update` function.
 
         Args:
@@ -164,16 +164,16 @@ def robust_holt_winters(lambda1: float, lambda2: float, lambda_sigma: float, del
         moment = init_moment(series)
         last = init_last(series, moment)
         sigma = init_sigma(series, moment, last)
-        return HoldWintersState(count=jnp.zeros([], jnp.int32), last=last, moment=moment,
+        return HoltWintersState(count=jnp.zeros([], jnp.int32), last=last, moment=moment,
                                 sigma=sigma)
 
-    def update_fn(new: Element, state: HoldWintersState):
+    def update_fn(new: Element, state: HoltWintersState):
         count = ox.safe_int32_increment(state.count)
         sigma = update_sigma(new - state.last - state.moment, state.sigma, lambda_sigma,
                              delta_sigma)
         last = update_last(new, state.last + state.moment, state.sigma, lambda1, delta1)
         moment = update_moment(last - state.last, state.moment, lambda2)
-        return last, HoldWintersState(count=count, last=last, moment=moment, sigma=sigma)
+        return last, HoltWintersState(count=count, last=last, moment=moment, sigma=sigma)
 
     return SmoothingTransformation(init_fn, update_fn)
 
@@ -181,7 +181,7 @@ class InjectHyperparamsState(NamedTuple):
     """Maintains inner transform state, hyperparameters, and step count."""
     count: jnp.ndarray
     hyperparams: Dict[str, chex.Numeric]
-    inner_state: HoldWintersState
+    inner_state: HoltWintersState
 
 def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
                        static_args: Union[str, Iterable[str]] = ()) -> Callable[..., SmoothingTransformation]:
@@ -347,12 +347,29 @@ def training(series: Series, init_decay: float=0.01, ratios: Tuple[float, float,
 
     return jax.nn.sigmoid(decays[-1]), (criteria, decays)
 
-def initialise(smoother: SmoothingTransformation, train: Series) -> HoldWintersState:
+def create_smoother(smoothe_over_signal: float, smoothe_over_gradient: float,
+                    smoothe_over_variance: float) -> SmoothingTransformation:
+    """Create a new Holt-Winters transformation.
+
+    Args:
+        smoothe_over_signal : Number of layers used to smoothe over the signal.
+        smoothe_over_gradient : Number of layers used to smoothe over the 
+            gradient.
+        smoothe_over_variance : Number of layers used to smoothe over the variance.
+
+    Returns:
+        A new Holt-Winters transformation.
+    """
+    return robust_holt_winters(lambda1=smoothe_over_signal**-1,
+                               lambda2=smoothe_over_gradient**-1,
+                               lambda_sigma=smoothe_over_variance**-1)
+
+def initialise(smoother: SmoothingTransformation, train: Series) -> HoltWintersState:
     """Calculate an initial smoothing state based on a preliminary series (train)
     of signal values.
 
     Args:
-        smoother : Hold-Winters smoothing transformation.
+        smoother : Holt-Winters smoothing transformation.
         train : A series of signal values used to calculate initial smoothing
             state.
 
@@ -361,16 +378,21 @@ def initialise(smoother: SmoothingTransformation, train: Series) -> HoldWintersS
     """
     return smoother.init(train)
 
-def smoothe(smoother: SmoothingTransformation, new: Element,
-            state: HoldWintersState) -> Tuple[Element, HoldWintersState]:
-    """Smoothe a current signal value and update a current smoothing state.
+SmoothingStep = Callable[[Element, HoltWintersState], Tuple[Element, HoltWintersState]]
+
+def smoothing_step(smoother: SmoothingTransformation) -> SmoothingStep:
+    """Returns a smoothing step function used in real-time smoothing. The function
+    takes a new signal point and a current smoothing state and returns a smoothed
+    signal and an updated state.
 
     Args:
-        smoother : Hold-Winters smoothing transformation.
-        new : Current signal value.
-        state : Current smoothing state.
+        smoother : Holt-Winters smoothing transformation.
 
     Returns:
-        Smoothed signal value and updated smoothing state.
+        Smoothing step function.
     """
-    return smoother.update(new, state)
+    @jax.jit
+    def step(new: Element, state: HoltWintersState) -> Tuple[Element, HoltWintersState]:
+        return smoother.update(new, state)
+    
+    return step
