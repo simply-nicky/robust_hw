@@ -22,11 +22,11 @@ columns = {'theta': 'Mag3 [Platter,Position]',
 
 def _get_unit(key: str) -> float:
     udict = {'deg': np.pi / 180.0, 'mm': 1e6, 'um': 1e3, 'nm': 1e0}
-    for unit_key in udict:
+    for unit_key, factor in udict.items():
         units = unit_key.split(',')
         for unit in units:
             if unit in key:
-                return udict[unit_key]
+                return factor
     return 1.0
 
 def read_hdf(path: str, key: str, name: str) -> np.ndarray:
@@ -50,7 +50,7 @@ def read_hdf(path: str, key: str, name: str) -> np.ndarray:
     for attr in df:
         if attr.startswith(name):
             return _get_unit(attr[len(name):]) * df[attr].to_numpy()
-        
+
 def read_csv(path: str, name: str) -> np.ndarray:
     """QCM Data extractor and convertor. Read raw QCM sensors read-outs and
     pre-processes the raw time-series.
@@ -73,7 +73,8 @@ def read_csv(path: str, name: str) -> np.ndarray:
         if attr.startswith(name):
             return _get_unit(attr[len(name):]) * df[attr].to_numpy()
 
-def extract_rotations(theta: np.ndarray, data: np.ndarray, limits: Tuple[float, float]) -> np.ndarray:
+def extract_rotations(theta: np.ndarray, data: np.ndarray,
+                      limits: Tuple[float, float] = (1.5 * np.pi, 13 / 6 * np.pi)) -> np.ndarray:
     """Integrate signal in a `limits` window for each rotation.
 
     Args:
@@ -122,7 +123,7 @@ class WindowDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.X[idx], self.Y[idx]
-    
+
 class AutoregressiveLSTM(Module):
     def __init__(self, input_size, hidden_size, n_layers: int=1, dropout: float=0.5):
         super(AutoregressiveLSTM, self).__init__()
@@ -141,7 +142,7 @@ class AutoregressiveLSTM(Module):
             hidden = weight.new(self.n_layers, self.hidden_size)
             cell = weight.new(self.n_layers, self.hidden_size)
         return hidden.zero_(), cell.zero_()
-    
+
     def forward(self, input: torch.Tensor, hidden):
         out, hidden = self.lstm(input, hidden)
         return self.dense(out[..., [-1], :]), hidden
@@ -320,7 +321,7 @@ class BayesianRidge():
         coef_ = np.zeros(X.shape[1], dtype=X.dtype)
         coef_[keep_lambda] = self.alpha_ * np.linalg.multi_dot([sigma, X[:, keep_lambda].T, y])
         return coef_
-    
+
     def _update_sigma_woodbury(self, X: np.ndarray, keep_lambda: np.ndarray) -> np.ndarray:
         X_keep = X[:, keep_lambda]
         inv_lambda = 1.0 / self.lambda_[keep_lambda].reshape(1, -1)
@@ -339,7 +340,7 @@ class BayesianRidge():
         eye = np.eye(gram.shape[0], dtype=X.dtype)
         sigma_ = pinvh(self.lambda_[keep_lambda] * eye + self.alpha_ * gram)
         return sigma_
-    
+
     def _lml(self, X: np.ndarray, rmse: np.ndarray, lambda_1: np.ndarray, lambda_2: np.ndarray) -> float:
         score = (lambda_1 * np.log(self.lambda_) - lambda_2 * self.lambda_).sum()
         score += self.alpha_1 * np.log(self.alpha_) - self.alpha_2 * self.alpha_
