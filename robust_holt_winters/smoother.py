@@ -9,7 +9,7 @@ import jax
 import numpy as np
 import optax as ox
 from optax import GradientTransformation, OptState
-from qcm_data import columns, read_csv, extract_rotations
+from .data_proc import columns, read_csv, extract_rotations
 
 Element = chex.Array
 Series = List[chex.Array]

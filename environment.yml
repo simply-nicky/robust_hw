@@ -1,0 +1,16 @@
+name: qcm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - chex
+  - h5py
+  - hdf5plugin
+  - jax
+  - numpy
+  - optax
+  - pandas
+  - pytables
+  - python>=3.7
+  - scipy
+  - tqdm
