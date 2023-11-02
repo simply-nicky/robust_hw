@@ -1,4 +1,4 @@
-from setuptools import setup, find_namespace_packages
+from setuptools import setup, find_packages
 
 with open('README.md', 'r') as readme:
     long_description = readme.read()
@@ -10,7 +10,9 @@ setup(name='robust_hw',
       long_description=long_description,
       long_description_content_type='text/markdown',
       url="https://github.com/simply-nicky/robust_hw",
-      paskages=find_namespace_packages(),
+      paskages=find_packages(),
+      package_dir={"": "robust_hw"},
+      include_package_data=False,
       install_requires=['h5py', 'numpy', 'scipy'],
       classifiers=[
           "Programming Language :: Python",

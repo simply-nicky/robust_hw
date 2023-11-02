@@ -405,57 +405,59 @@ def smoothing_step(smoother: SmoothingTransformation) -> SmoothingStep:
 
     return step
 
-def main(out_path: str, log_path: str, sensor: int=1, period: int=10, init_value: float=10.0,
-         n_iter: int=2000, sizes: Tuple[int, int, int] = (100, 200, 100),
-         learning_rate: float=3e-3, seed: int=0):
-    """Perform training of the Holt-Winters smoothing algorithm and return optimal
-    decay rates for the signal, gradient, and standard deviation.
-
-    Args:
-        series : Series of signal values used in training.
-        init_decay : Initial value of decay rates.
-        sizes : Specifies the size of a sequence used for warm-up, training, and
-            testing stages in a single iteration.
-        n_iter : Number of training iterations.
-        learning_rate : Learning rate for gradient optimiser of decay rates.
-        seed : Seed used for random number generator.
-
-    Returns:
-        Optimal decay rates for signal, gradient, and standard deviation. Also,
-        it returns the history of loss values and decay rates at each iteration.
+def main():
+    """Perform training of the Holt-Winters smoothing algorithm and save optimal decay rates for the signal,
+    gradient, and standard deviation to a HDF5 file.
     """
+
+    import argparse
+    parser = argparse.ArgumentParser(description="Performing training of Robust Holt-Winters smoothing transformation")
+    parser.add_argument('out_path', type=str, help="Path to a HDF5 file where the results of the training will be saved")
+    parser.add_argument('log_path', type=str, help="Path to the log file with the QC measurements read-outs")
+    parser.add_argument('--sensor', '-s', type=int, choices=[1, 2], default=1,
+                        help="Choose between 'Sensor1' (1) and 'Sensor2' (2)")
+    parser.add_argument('--period', '-p', type=int, default=10, help="Choose over how many layers the QC measurements"\
+                        "should be summed over (Sum over)")
+    parser.add_argument('--init', '-i', type=float, default=10.0, help="The initial smoothe over value [in periods]")
+    parser.add_argument('--n_iter', '-n', type=int, default=2000, help="Number of training iterations")
+    parser.add_argument('--sizes', type=int, nargs=3, default=(100, 200, 100),
+                        help="Specify the size of series used for warm-up, smoothing, and testing stages [in periods]")
+    parser.add_argument('--lrate', '-l', type=float, default=3e-3, help="Learning rate of gradient optimiser")
+
+    args = parser.parse_args()
+
     keys = {1: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'},
             2: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'}}
 
-    print(f"Reading '{keys[sensor]['signal']}' and '{keys[sensor]['background']}' from {log_path}")
+    print(f"Reading '{keys[args.sensor]['signal']}' and '{keys[args.sensor]['background']}' from {args.log_path}")
 
-    theta_raw = jnp.unwrap(read_csv(log_path, columns['theta']))
-    signal = read_csv(log_path, keys[sensor]["signal"])
-    background = read_csv(log_path, keys[sensor]["background"])
+    theta_raw = jnp.unwrap(read_csv(args.log_path, columns['theta']))
+    signal = read_csv(args.log_path, keys[args.sensor]["signal"])
+    background = read_csv(args.log_path, keys[args.sensor]["background"])
 
     print("Preparing data...")
 
     _, signal = extract_rotations(theta_raw, signal)
     _, background = extract_rotations(theta_raw, background)
 
-    series = (signal - background)[::period]
+    series = (signal - background)[::args.period]
 
-    smoother = inject_hyperparams(robust_holt_winters)(lambda1=init_value**-1,
-                                                       lambda2=init_value**-1,
-                                                       lambda_sigma=init_value**-1)
-    schedule = ox.cosine_onecycle_schedule(n_iter, learning_rate)
+    smoother = inject_hyperparams(robust_holt_winters)(lambda1=args.init**-1,
+                                                       lambda2=args.init**-1,
+                                                       lambda_sigma=args.init**-1)
+    schedule = ox.cosine_onecycle_schedule(args.n_iter, args.lrate)
     opt = ox.inject_hyperparams(ox.adam)(learning_rate=schedule)
 
-    decay = jnp.full(3, -jnp.log(init_value - 1))
+    decay = jnp.full(3, -jnp.log(args.init - 1))
     opt_state = opt.init(decay)
 
-    n_warmup, n_train, n_test = sizes
+    n_warmup, n_train, n_test = args.sizes
 
     step = meta_step(smoother, opt)
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.PRNGKey(666420)
     criteria, decays = [], []
 
-    with tqdm.trange(n_iter, desc="Training") as pbar:
+    with tqdm.trange(args.n_iter, desc="Training") as pbar:
         for i in pbar:
             if i % 100 == 0:
                 new_values = jax.nn.sigmoid(decay)**-1
@@ -478,31 +480,11 @@ def main(out_path: str, log_path: str, sensor: int=1, period: int=10, init_value
           f"sum_over_gradient = {new_values[1]:<7.3f}, " +
           f"sum_over_variance = {new_values[2]:<7.3f}")
 
-    with h5py.File(out_path, 'w') as out_file:
+    with h5py.File(args.out_path, 'w') as out_file:
         values = jax.nn.sigmoid(jnp.stack(decays))**-1
         out_file.create_dataset('data/criteria', data=criteria)
         out_file.create_dataset('data/sum_over_signal', data=values[:, 0])
         out_file.create_dataset('data/sum_over_gradient', data=values[:, 1])
         out_file.create_dataset('data/sum_over_variance', data=values[:, 2])
 
-    print(f"Results saved to {out_path}")
-
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description="Performing training of Robust Holt-Winters smoothing transformation")
-    parser.add_argument('out_path', type=str, help="Path to a HDF5 file where the results of the training will be saved")
-    parser.add_argument('log_path', type=str, help="Path to the log file with the QC measurements read-outs")
-    parser.add_argument('--sensor', '-s', type=int, choices=[1, 2], default=1,
-                        help="Choose between 'Sensor1' (1) and 'Sensor2' (2)")
-    parser.add_argument('--period', '-p', type=int, default=10, help="Choose over how many layers the QC measurements"\
-                        "should be summed over (Sum over)")
-    parser.add_argument('--init', '-i', type=float, default=10.0, help="The initial smoothe over value [in periods]")
-    parser.add_argument('--n_iter', '-n', type=int, default=2000, help="Number of training iterations")
-    parser.add_argument('--sizes', type=int, nargs=3, default=(100, 200, 100),
-                        help="Specify the size of series used for warm-up, smoothing, and testing stages [in periods]")
-    parser.add_argument('--lrate', '-l', type=float, default=3e-3, help="Learning rate of gradient optimiser")
-
-    args = parser.parse_args()
-
-    main(out_path=args.out_path, log_path=args.log_path, sensor=args.sensor, period=args.period, init_value=args.init,
-         n_iter=args.n_iter, sizes=args.sizes, learning_rate=args.lrate, seed=666420)
+    print(f"Results saved to {args.out_path}")

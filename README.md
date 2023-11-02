@@ -24,4 +24,4 @@ Then, you can install from source with the following command:
 
 ## Article
 
-The implementation is based on the article "Robust forecasting with exponential and Holt-Winters smoothing" published in [Wiley][https://onlinelibrary.wiley.com/doi/10.1002/for.1125].
+The implementation is based on the article "Robust forecasting with exponential and Holt-Winters smoothing" published in [Wiley](https://onlinelibrary.wiley.com/doi/10.1002/for.1125).
