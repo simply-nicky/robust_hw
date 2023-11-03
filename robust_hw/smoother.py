@@ -427,7 +427,7 @@ def main():
     args = parser.parse_args()
 
     keys = {1: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'},
-            2: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'}}
+            2: {"signal": 'Mag3 [QCM,S2 signal]', "background": 'Mag3 [QCM,S2 background]'}}
 
     print(f"Reading '{keys[args.sensor]['signal']}' and '{keys[args.sensor]['background']}' from {args.log_path}")
 
