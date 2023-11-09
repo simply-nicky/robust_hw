@@ -78,13 +78,14 @@ def extract_rotations(theta: np.ndarray, data: np.ndarray,
         Integrated signal.
     """
     qtn, rmd = np.divmod(theta - limits[0], 2.0 * np.pi)
-    idxs = (qtn.astype(int) + 1) * np.asarray(rmd < (limits[1] - limits[0]), dtype=int)
+    idxs = np.asarray(qtn - qtn.min() + 1, dtype=int) \
+         * np.asarray(rmd < (limits[1] - limits[0]), dtype=int)
 
     qcm_sum = np.zeros(idxs.max() + 1)
     qcm_cnt = np.zeros(idxs.max() + 1)
     np.add.at(qcm_sum, idxs, data)
     np.add.at(qcm_cnt, idxs, np.ones(idxs.size))
-    return np.unique(qtn), (qcm_sum / qcm_cnt)[1:]
+    return np.unique(qtn - qtn.min()), (qcm_sum / qcm_cnt)[1:]
 
 def integrate(signal, background, period):
     grad = np.gradient(signal)
