@@ -94,7 +94,8 @@ def init_moment(series: Series):
     idxs = jnp.arange(len(series))
     mat = jax.vmap(jax.vmap(jnp.subtract, (None, 0)), (0, None))(series, series)
     div = jax.vmap(jax.vmap(jnp.subtract, (None, 0)), (0, None))(idxs, idxs)
-    mat = mat / jnp.expand_dims(div, axis=jnp.arange(div.ndim, mat.ndim))
+    div = jnp.expand_dims(div, axis=jnp.arange(div.ndim, mat.ndim))
+    mat = jnp.where(div, mat / div, 0.0)
     mat = mat[~jnp.eye(len(series), dtype=bool)].reshape((len(series), len(series) - 1) + series[0].shape)
     return jnp.median(jnp.median(mat, axis=1), axis=0)
 
@@ -427,7 +428,7 @@ def main():
                         help="Specify the size of series used for warm-up, smoothing, and testing stages [in periods]")
     parser.add_argument('--lrate', '-l', type=float, default=3e-3, help="Learning rate of gradient optimiser")
 
-    args = parser.parse_args()
+    args = parser.parse_args(['test.h5', 'data/Z-230901A.csv'])
 
     keys = {1: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'},
             2: {"signal": 'Mag3 [QCM,S2 signal]', "background": 'Mag3 [QCM,S2 background]'}}
@@ -443,7 +444,7 @@ def main():
     _, signal = extract_rotations(theta_raw, signal)
     _, background = extract_rotations(theta_raw, background)
 
-    series = (signal - background)[::args.period]
+    series = jnp.array(signal - background)[::args.period]
 
     smoother = inject_hyperparams(robust_holt_winters)(lambda1=args.init**-1,
                                                        lambda2=args.init**-1,
