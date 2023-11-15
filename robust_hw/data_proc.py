@@ -65,6 +65,7 @@ def read_csv(path: str, name: str) -> np.ndarray:
     for attr in df:
         if attr.startswith(name):
             return _get_unit(attr[len(name):]) * df[attr].to_numpy()
+    raise AttributeError(f"No {name} in the file")
 
 def extract_rotations(theta: np.ndarray, data: np.ndarray,
                       limits: Tuple[float, float] = (1.5 * np.pi, 13 / 6 * np.pi)) -> np.ndarray:

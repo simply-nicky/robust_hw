@@ -6,4 +6,5 @@ numpy
 optax
 pandas
 scipy
+tables
 tqdm

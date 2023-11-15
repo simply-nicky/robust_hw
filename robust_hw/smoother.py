@@ -162,9 +162,9 @@ def robust_holt_winters(lambda1: float, lambda2: float, lambda_sigma: float, del
     Returns:
         The corresponding `SmoothingTransformation`.
     """
-    lambda1 = jnp.clip(lambda1, 1.0, jnp.inf)
-    lambda2 = jnp.clip(lambda2, 1.0, jnp.inf)
-    lambda_sigma = jnp.clip(lambda_sigma, 1.0, jnp.inf)
+    lambda1 = jnp.clip(lambda1, 0.0, 1.0)
+    lambda2 = jnp.clip(lambda2, 0.0, 1.0)
+    lambda_sigma = jnp.clip(lambda_sigma, 0.0, 1.0)
 
     def init_fn(series):
         moment = init_moment(series)
@@ -428,7 +428,7 @@ def main():
                         help="Specify the size of series used for warm-up, smoothing, and testing stages [in periods]")
     parser.add_argument('--lrate', '-l', type=float, default=3e-3, help="Learning rate of gradient optimiser")
 
-    args = parser.parse_args(['test.h5', 'data/Z-230901A.csv'])
+    args = parser.parse_args()
 
     keys = {1: {"signal": 'Mag3 [QCM,S1 signal]', "background": 'Mag3 [QCM,S1 background]'},
             2: {"signal": 'Mag3 [QCM,S2 signal]', "background": 'Mag3 [QCM,S2 background]'}}
