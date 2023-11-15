@@ -161,7 +161,9 @@ def robust_holt_winters(lambda1: float, lambda2: float, lambda_sigma: float, del
     Returns:
         The corresponding `SmoothingTransformation`.
     """
-    lambda1, lambda2, lambda_sigma = min(lambda1, 1.0), min(lambda2, 1.0), min(lambda_sigma, 1.0)
+    lambda1 = jnp.clip(lambda1, 1.0, jnp.inf)
+    lambda2 = jnp.clip(lambda2, 1.0, jnp.inf)
+    lambda_sigma = jnp.clip(lambda_sigma, 1.0, jnp.inf)
 
     def init_fn(series):
         moment = init_moment(series)

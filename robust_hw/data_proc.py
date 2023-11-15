@@ -9,7 +9,7 @@ columns = {'theta': 'Mag3 [Platter,Position]',
             's1_sgn': 'Mag3 [QCM,S1 signal]',
             's2_sgn': 'Mag3 [QCM,S2 signal]',
             's1_bgd': 'Mag3 [QCM,S1 background]',
-            's2_bgd': 'Mag3 [QCM,S1 background]',
+            's2_bgd': 'Mag3 [QCM,S2 background]',
             's1_factor': 'Mag3 [QCM,S1 factor] (None)',
             's2_factor': 'Mag3 [QCM,S2 factor] (None)'}
 
