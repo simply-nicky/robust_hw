@@ -273,47 +273,42 @@ def inject_hyperparams(inner_factory: Callable[..., SmoothingTransformation],
 
     return wrapped_transform
 
-StepOutput = Tuple[jnp.ndarray, jnp.ndarray, InjectHyperparamsState, OptState]
-MetaStep = Callable[[jnp.ndarray, Series, Series, InjectHyperparamsState, OptState], StepOutput]
+StepOutput = Tuple[jnp.ndarray, jnp.ndarray, OptState]
+MetaStep = Callable[[jnp.ndarray, Series, InjectHyperparamsState, OptState], StepOutput]
 
-def meta_step(smoother: SmoothingTransformation, opt: GradientTransformation) -> MetaStep:
-    @jax.jit
-    def inner_step(state: InjectHyperparamsState,
-                   new: Element) -> Tuple[InjectHyperparamsState, jnp.ndarray]:
-        elem, state = smoother.update(new, state)
-        return state, jnp.array([elem, state.inner_state.sigma])
+def meta_step(smoother: SmoothingTransformation, opt: GradientTransformation, lookahead: int=10) -> MetaStep:
+    def inner_step(train: Series):
+        idxs = jnp.arange(lookahead)
+        @jax.jit
+        def step(state, new):
+            _, new_state = smoother.update(train[new], state)
+            err = train[new + idxs] - state.inner_state.last - (1 + idxs) * state.inner_state.moment
+            return new_state, jnp.sum(ox.huber_loss(err / state.inner_state.sigma) * state.inner_state.sigma)
+        return step
 
     @jax.jit
-    def loss(theta: jnp.ndarray, state: InjectHyperparamsState, train: Series,
-             test: Series) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, InjectHyperparamsState]]:
+    def loss(theta: jnp.ndarray, state: InjectHyperparamsState, train: Series) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, InjectHyperparamsState]]:
         lambda1, lambda2, lambda_sigma = jax.nn.sigmoid(theta)
         state.hyperparams.update(lambda1=lambda1, lambda2=lambda2, lambda_sigma=lambda_sigma)
 
-        state, _ = jax.lax.scan(inner_step, state, train)
-        idxs = jnp.arange(1, len(test) + 1)
-        offsets = jax.vmap(jnp.multiply, (None, 0))(state.inner_state.moment, idxs)
-        predictions = state.inner_state.last + offsets
-        err = ox.huber_loss((test - predictions) / state.inner_state.sigma) * \
-              state.inner_state.sigma + state.inner_state.sigma
+        state, errors = jax.lax.scan(inner_step(train), state, jnp.arange(train.size - lookahead + 1))
 
-        return jnp.sum(err), (theta, state)
+        return jnp.sum(errors)
 
     @jax.jit
-    def step(theta: jnp.ndarray, train: Series, test: Series, state: InjectHyperparamsState,
-             opt_state: OptState) -> StepOutput:
-        (value, (theta, state)), grad = jax.value_and_grad(loss, has_aux=True)(theta, state,
-                                                                               train, test)
+    def step(theta: jnp.ndarray, train: Series, state: InjectHyperparamsState, opt_state: OptState) -> StepOutput:
+        value, grad = jax.value_and_grad(loss)(theta, state, train)
 
         updates, opt_state = opt.update(grad, opt_state)
         theta = ox.apply_updates(theta, updates)
 
-        return value, theta, state, opt_state
+        return value, theta, opt_state
 
     return step
 
 def training(series: Series, init_value: float=5.0, n_iter: int=2000,
-             ratios: Tuple[float, float, float] = (2, 3, 2),
-             learning_rate: float=3e-3, seed: int=0):
+             n_warmup: int=200, n_start: int=200, lookahead: int=10,
+             learning_rate: float=3e-3):
     """Perform training of the Holt-Winters smoothing algorithm and return optimal
     decay rates for the signal, gradient, and standard deviation.
 
@@ -339,21 +334,17 @@ def training(series: Series, init_value: float=5.0, n_iter: int=2000,
     decay = jnp.full(3, -jnp.log(init_value - 1))
     opt_state = opt.init(decay)
 
-    n_warmup, n_train, n_test = (max(int(ratio * init_value), 1) for ratio in ratios)
+    train, warmup = series[n_start + n_warmup:], series[n_start:n_start + n_warmup]
+    init_state = smoother.init(warmup)
 
-    step = meta_step(smoother, opt)
-    key = jax.random.PRNGKey(seed)
+    step = meta_step(smoother, opt, lookahead)
     criteria, decays = [], []
 
     with tqdm.auto.tqdm(range(n_iter), desc="Training") as pbar:
         for _ in pbar:
-            idx = jax.random.randint(key, (1,), n_warmup, series.size - n_train - n_test)[0]
-
-            state = smoother.init(series[idx - n_warmup:idx])
-            train, test = series[idx:idx + n_train], series[idx + n_train:idx + n_train + n_test]
-
-            crit, decay, state, opt_state = step(decay, train, test, state, opt_state)
+            crit, decay, opt_state = step(decay, train, init_state, opt_state)
             pbar.set_postfix_str(f"loss = {crit:.2e}")
+
             criteria.append(crit)
             decays.append(decay)
 
@@ -422,11 +413,15 @@ def main():
                         help="Choose between 'Sensor1' (1) and 'Sensor2' (2)")
     parser.add_argument('--period', '-p', type=int, default=10, help="Choose over how many layers the QC measurements"\
                         "should be summed over (Sum over)")
-    parser.add_argument('--init', '-i', type=float, default=10.0, help="The initial smoothe over value [in periods]")
-    parser.add_argument('--n_iter', '-n', type=int, default=2000, help="Number of training iterations")
-    parser.add_argument('--sizes', type=int, nargs=3, default=(100, 200, 100),
-                        help="Specify the size of series used for warm-up, smoothing, and testing stages [in periods]")
-    parser.add_argument('--lrate', '-l', type=float, default=3e-3, help="Learning rate of gradient optimiser")
+    parser.add_argument('--init', '-i', type=float, default=2.0, help="The initial smoothe over value [in periods]")
+    parser.add_argument('--n_iter', '-n', type=int, default=10000, help="Number of training iterations")
+    parser.add_argument('--n_start', type=int, nargs=3, default=100,
+                        help="Skip first `n_start` period of the series [in periods]")
+    parser.add_argument('--n_warmup', type=int, nargs=3, default=200,
+                        help="Specify the size of series used for warm-up [in periods]")
+    parser.add_argument('--lookahead', type=int, default=10,
+                        help="Number of the next elements used in the error calculations")
+    parser.add_argument('--lrate', '-lr', type=float, default=3e-3, help="Learning rate of gradient optimiser")
 
     args = parser.parse_args()
 
@@ -455,10 +450,11 @@ def main():
     decay = jnp.full(3, -jnp.log(args.init - 1))
     opt_state = opt.init(decay)
 
-    n_warmup, n_train, n_test = args.sizes
+    train, warmup = (series[args.n_start + args.n_warmup:],
+                     series[args.n_start:args.n_start + args.n_warmup])
+    init_state = smoother.init(warmup)
 
-    step = meta_step(smoother, opt)
-    key = jax.random.PRNGKey(666420)
+    step = meta_step(smoother, opt, args.lookahead)
     criteria, decays = [], []
 
     with tqdm.trange(args.n_iter, desc="Training") as pbar:
@@ -468,12 +464,8 @@ def main():
                 pbar.write(f"sum_over_signal = {new_values[0]:<7.3f}, " +
                            f"sum_over_gradient = {new_values[1]:<7.3f}, " +
                            f"sum_over_variance = {new_values[2]:<7.3f}")
-            idx = jax.random.randint(key, (1,), n_warmup, series.size - n_train - n_test)[0]
 
-            state = smoother.init(series[idx - n_warmup:idx])
-            train, test = series[idx:idx + n_train], series[idx + n_train:idx + n_train + n_test]
-
-            crit, decay, state, opt_state = step(decay, train, test, state, opt_state)
+            crit, decay, opt_state = step(decay, train, init_state, opt_state)
             pbar.set_postfix_str(f"loss = {crit:.2e}")
 
             criteria.append(crit)
